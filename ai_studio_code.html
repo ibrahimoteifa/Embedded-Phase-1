@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maze Robot Controller</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --panel-bg: #1e1e1e;
+            --primary: #00ff88;
+            --danger: #ff4757;
+            --text: #ffffff;
+            --text-muted: #aaaaaa;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            color: var(--primary);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 5px;
+            text-align: center;
+        }
+
+        .status-badge {
+            padding: 5px 15px;
+            border-radius: 20px;
+            background-color: #333;
+            font-size: 0.9em;
+            margin-bottom: 20px;
+            font-weight: bold;
+        }
+
+        .container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            width: 100%;
+            max-width: 900px;
+        }
+
+        .control-panel, .monitor-panel {
+            background-color: var(--panel-bg);
+            border-radius: 12px;
+            padding: 20px;
+            flex: 1;
+            min-width: 300px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.5);
+        }
+
+        h2 {
+            margin-top: 0;
+            font-size: 1.2em;
+            color: var(--text-muted);
+            border-bottom: 2px solid #333;
+            padding-bottom: 10px;
+        }
+
+        /* Buttons */
+        .btn-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        button {
+            background-color: #333;
+            color: white;
+            border: 2px solid transparent;
+            padding: 15px 10px;
+            font-size: 1em;
+            font-weight: bold;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+
+        button:hover { background-color: #444; }
+        button:active { transform: scale(0.95); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .btn-connect { grid-column: span 2; background-color: #2e86de; }
+        .btn-connect:hover { background-color: #54a0ff; }
+        
+        .btn-left { border-color: #feca57; color: #feca57; }
+        .btn-right { border-color: #1dd1a1; color: #1dd1a1; }
+        
+        .btn-return { grid-column: span 2; border-color: #9b59b6; color: #9b59b6; }
+        .btn-stop { grid-column: span 2; background-color: var(--danger); }
+        .btn-stop:hover { background-color: #ff6b81; }
+
+        /* Serial Monitor */
+        .terminal {
+            background-color: #000;
+            color: #00ff00;
+            font-family: 'Courier New', Courier, monospace;
+            padding: 15px;
+            height: 350px;
+            border-radius: 8px;
+            overflow-y: auto;
+            font-size: 0.9em;
+            line-height: 1.5;
+            box-shadow: inset 0 0 10px rgba(0,255,0,0.1);
+        }
+
+        .terminal span { display: block; }
+        .timestamp { color: #888; font-size: 0.8em; margin-right: 10px; }
+        .tx-msg { color: #00a8ff; } /* Sent messages in blue */
+
+    </style>
+</head>
+<body>
+
+    <h1>Maze Robot Control</h1>
+    <div id="status" class="status-badge" style="color: #ff4757;">Disconnected</div>
+
+    <div class="container">
+        <!-- Controls -->
+        <div class="control-panel">
+            <h2>Command Center</h2>
+            <div class="btn-grid">
+                <button id="btnConnect" class="btn-connect">🔗 Connect to Robot</button>
+                <button id="btnLeft" class="btn-left" disabled>⬅️ Start (Left-Hand)</button>
+                <button id="btnRight" class="btn-right" disabled>➡️ Start (Right-Hand)</button>
+                <button id="btnReturn" class="btn-return" disabled>🏠 Approve Return Trip</button>
+                <button id="btnStop" class="btn-stop" disabled>🛑 END / STOP</button>
+            </div>
+        </div>
+
+        <!-- Serial Monitor -->
+        <div class="monitor-panel">
+            <h2>Bluetooth Serial Monitor</h2>
+            <div id="terminal" class="terminal"></div>
+        </div>
+    </div>
+
+    <script>
+        // HM-10 Default UUIDs
+        const SERVICE_UUID = 0xFFE0; 
+        const CHARACTERISTIC_UUID = 0xFFE1;
+
+        let bleDevice;
+        let bleCharacteristic;
+        let receiveBuffer = "";
+
+        const statusEl = document.getElementById('status');
+        const terminalEl = document.getElementById('terminal');
+        
+        const btnConnect = document.getElementById('btnConnect');
+        const btnLeft = document.getElementById('btnLeft');
+        const btnRight = document.getElementById('btnRight');
+        const btnReturn = document.getElementById('btnReturn');
+        const btnStop = document.getElementById('btnStop');
+
+        const buttons = [btnLeft, btnRight, btnReturn, btnStop];
+
+        // Ensure browser supports Web Bluetooth
+        if (!navigator.bluetooth) {
+            alert("Web Bluetooth is not supported in this browser! Please use Google Chrome or Microsoft Edge on a PC/Mac/Android.");
+            btnConnect.disabled = true;
+        }
+
+        // Connect Button Event
+        btnConnect.addEventListener('click', async () => {
+            if (bleDevice && bleDevice.gatt.connected) {
+                bleDevice.gatt.disconnect();
+                return;
+            }
+
+            try {
+                logToTerminal("Requesting Bluetooth Device...");
+                bleDevice = await navigator.bluetooth.requestDevice({
+                    acceptAllDevices: true,
+                    optionalServices: [SERVICE_UUID]
+                });
+
+                bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+
+                logToTerminal(`Connecting to ${bleDevice.name || 'Unknown Device'}...`);
+                const server = await bleDevice.gatt.connect();
+                
+                logToTerminal("Discovering HM-10 Service...");
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                
+                logToTerminal("Discovering HM-10 Characteristic...");
+                bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+                
+                logToTerminal("Subscribing to notifications...");
+                await bleCharacteristic.startNotifications();
+                bleCharacteristic.addEventListener('characteristicvaluechanged', handleReceive);
+
+                updateStatus(true);
+                logToTerminal("--- CONNECTION SUCCESSFUL ---", "tx-msg");
+
+            } catch (error) {
+                logToTerminal(`Connection Error: ${error}`, "tx-msg");
+            }
+        });
+
+        // Command Buttons
+        btnLeft.addEventListener('click', () => sendCommand('L'));
+        btnRight.addEventListener('click', () => sendCommand('R'));
+        btnReturn.addEventListener('click', () => sendCommand('B'));
+        btnStop.addEventListener('click', () => sendCommand('E'));
+
+        // Handle Disconnect
+        function onDisconnected() {
+            updateStatus(false);
+            logToTerminal("--- DEVICE DISCONNECTED ---", "tx-msg");
+        }
+
+        // Update UI State
+        function updateStatus(connected) {
+            if (connected) {
+                statusEl.innerText = "🟢 Connected";
+                statusEl.style.color = "#00ff88";
+                btnConnect.innerText = "🔌 Disconnect";
+                btnConnect.style.backgroundColor = "#ff4757";
+                buttons.forEach(btn => btn.disabled = false);
+            } else {
+                statusEl.innerText = "🔴 Disconnected";
+                statusEl.style.color = "#ff4757";
+                btnConnect.innerText = "🔗 Connect to Robot";
+                btnConnect.style.backgroundColor = "#2e86de";
+                buttons.forEach(btn => btn.disabled = true);
+                bleCharacteristic = null;
+            }
+        }
+
+        // Send Command to Arduino
+        async function sendCommand(cmd) {
+            if (!bleCharacteristic) return;
+            try {
+                let encoder = new TextEncoder();
+                await bleCharacteristic.writeValue(encoder.encode(cmd));
+                logToTerminal(`Command Sent: '${cmd}'`, "tx-msg");
+            } catch (error) {
+                logToTerminal(`Send Error: ${error}`);
+            }
+        }
+
+        // Receive Data from Arduino
+        function handleReceive(event) {
+            let decoder = new TextDecoder();
+            let chunk = decoder.decode(event.target.value);
+            receiveBuffer += chunk;
+
+            // Split into lines like a real serial monitor
+            if (receiveBuffer.includes('\n')) {
+                let lines = receiveBuffer.split('\n');
+                for (let i = 0; i < lines.length - 1; i++) {
+                    let cleanLine = lines[i].replace('\r', '');
+                    if (cleanLine.trim() !== '') {
+                        logToTerminal(cleanLine);
+                    }
+                }
+                // Keep the remainder if it didn't end with \n
+                receiveBuffer = lines[lines.length - 1];
+            }
+        }
+
+        // Print to Terminal UI
+        function logToTerminal(message, customClass = "") {
+            const time = new Date().toLocaleTimeString([], { hour12: false });
+            const span = document.createElement("span");
+            if (customClass) span.classList.add(customClass);
+            
+            span.innerHTML = `<span class="timestamp">[${time}]</span> ${message}`;
+            terminalEl.appendChild(span);
+            
+            // Auto-scroll to bottom
+            terminalEl.scrollTop = terminalEl.scrollHeight;
+        }
+    </script>
+</body>
+</html>
